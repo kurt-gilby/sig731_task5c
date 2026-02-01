@@ -1,0 +1,1499 @@
+---
+title: "Task 5C – Data Wrangling Report"
+author: "Kurt Warren Mario Gilby (S225531065) | kurt.gilby@gmail.com"
+format:
+  pdf:
+    keep-tex: false
+    toc: true
+    number-sections: true
+freeze: auto
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+## Overview
+This task focuses on practical data wrangling and exploratory analysis using a real-world dataset derived from a StackExchange question-and-answer community. The dataset consists of multiple interrelated tables describing users, posts, comments, votes, tags, and activity history. The raw data originates in XML format and is converted into structured CSV files for analysis using Python.
+
+The task emphasises the end-to-end data wrangling process, including data ingestion, parsing, cleaning, transformation, integration of multiple tables, and exploratory visualisation. Particular attention is given to extracting information from unstructured text fields using regular expressions and producing meaningful visual summaries of community behaviour over time and space.
+\newpage
+
+### Context 
+Online discussion platforms such as StackExchange generate large volumes of semi-structured and unstructured data. While this data is rich in information, it is not immediately suitable for analysis due to its hierarchical structure, textual complexity, and distributed nature across multiple related files.
+
+In this task, data from a StackExchange site is analysed to understand posting activity, user participation, tag usage, and content characteristics. The dataset includes temporal attributes, textual fields (such as post bodies, tags, and user locations), and relational links between entities. These characteristics make the dataset representative of common challenges encountered in real-world data wrangling scenarios.
+
+### Objectives
+The objectives of Task 5C are as follows:
+
+- To design and implement a reusable Python function to convert StackExchange XML data into structured CSV format.
+- To load, clean, and integrate multiple CSV tables using pandas for exploratory analysis.
+- To extract meaningful information from unstructured text fields using regular expressions.
+- To generate at least five non-trivial visualisations or summary tables that provide insight into user behaviour, content trends, and platform activity.
+- To include spatial and textual analyses through the creation of a geographic map and a word cloud.
+- To demonstrate clear reasoning, reproducible analysis, and effective communication of results through a Quarto-generated report.
+- By working with this dataset, the task simulates realistic analytical workflows where data must be programmatically converted, cleaned, reshaped, and combined before insights can be extracted.
+\newpage
+
+## Data Selection and Source Description
+
+### Selected Data Source
+
+The dataset used in this task was sourced from the **Artificial Intelligence Stack Exchange**, a specialised question-and-answer forum within the Stack Exchange network. This site focuses on conceptual and practical discussions related to artificial intelligence, including topics such as machine learning, reasoning systems, intelligent agents, and the societal implications of AI technologies.
+
+The Artificial Intelligence Stack Exchange was selected because it provides a rich, domain-specific dataset containing both structured and unstructured information. The platform’s emphasis on high-quality, community-moderated questions and answers makes it well suited for data wrangling tasks involving text processing, relational data integration, and exploratory analysis of user behaviour and content trends.
+
+### Data Availability and Access (2026)
+
+Historically, Stack Exchange data dumps were published regularly to the Internet Archive. However, as of mid-2024, Stack Overflow officially discontinued the automated uploading of new Stack Exchange data dumps to the Internet Archive. While community-maintained mirrors may still exist, they are not guaranteed to be complete or up to date.
+
+As a result, for work conducted in 2026, the most reliable method for obtaining current Stack Exchange data is through the official Stack Exchange account settings, where users can request and download their own data exports. This task therefore uses data obtained from the Internet Archive as a representative historical snapshot, suitable for demonstrating realistic data wrangling workflows.
+
+The primary archival source for the Stack Exchange data is:
+
+- **Stack Exchange Data Dumps (Internet Archive):**  
+  [https://archive.org/details/stackexchange/](https://archive.org/details/stackexchange/)
+
+The specific dataset analysed in this task corresponds to the **Artificial Intelligence Stack Exchange** site and was downloaded directly from the Internet Archive repository:
+
+- **Artificial Intelligence Stack Exchange Data (compressed archive):**  
+  [https://archive.org/download/stackexchange/ai.stackexchange.com.7z](https://archive.org/download/stackexchange/ai.stackexchange.com.7z)
+
+### Dataset Structure and Characteristics
+
+The Stack Exchange data is provided as a collection of relational tables, originally stored in XML format and later converted into CSV files for analysis. The Artificial Intelligence Stack Exchange dataset includes multiple interconnected tables such as posts, users, comments, votes, badges, and tags. These tables are linked through shared identifiers (e.g., post IDs and user IDs), enabling integrated analysis across different aspects of platform activity.
+
+At the time of data extraction, the Artificial Intelligence Stack Exchange exhibited the following characteristics:
+
+- Approximately **13,000 questions** and **14,000 answers**
+- Around **70% of questions answered**
+- Roughly **88,000 registered users**
+- An average rating score of approximately **0.9**
+- A site age of approximately **9 years and 5 months**
+- An average of **multiple questions per day**
+
+The site’s focus can be summarised as a question-and-answer platform for individuals interested in the conceptual foundations, real-world applications, and broader implications of artificial intelligence in a world where traditionally “cognitive” functions can be mimicked within purely digital environments.
+
+### Data Import and Preparation (XML -> CSV -> Dataframe)
+### Overview of the pipeline
+The StackExchange dataset is originally supplied in **XML** format, where each record is stored as a **<row ... />** element with attributes representing fields (for example Id, CreationDate, Text, etc.). Because **XML** is hierarchical and may contain inconsistent attribute sets across rows, the first step is to programmatically infer a robust column schema for each file and then convert the data into **CSV**, which is easier to manipulate using **Pandas Dataframe**.
+
+#### Step 1 — Locate XML files
+We begin by recursively scanning a base folder and collecting the file path for every .**xml** file. Each file is stored with metadata (folder name, filename, full path) to support clean iteration later.
+
+```{python}
+#| label: xml-file-discovery
+import os
+import csv
+import xml.etree.ElementTree as ET
+import pandas as pd
+import numpy as np
+
+BASE_PATH = r"./data/site/"
+def get_xml_files_path_from_base_path(base_path):
+    """
+        Takes a base path and returns relative path for the xml files
+    """
+    results = []
+    # Ensure the path exists to avoid errors
+    if not os.path.exists(base_path):
+        return results
+        
+    for filename in os.listdir(base_path):
+        if filename.endswith('.xml'):
+            file_path = os.path.join(base_path, filename)
+            # Store as a dictionary so we can keep track of name and path
+            results.append({
+                'filename': filename,
+                'path': file_path,
+                'size': os.path.getsize(file_path)
+            })
+    # Sort the list of dictionaries by the 'size' key
+    results.sort(key=lambda x: x['size'])
+    return results
+xml_files_info = get_xml_files_path_from_base_path(BASE_PATH)
+xml_files_info[:2]
+```
+##### Output shown above: 
+the count confirms the scan worked, and the sample preview confirms we are pointing to the correct location.
+
+#### Step 2 — Infer column headers from XML attributes
+
+In the StackExchange XML files, each record is stored as a **<row ... />** element, where the attributes of the **row** tag represent the fields of that record. Because different rows may contain different attribute sets, column names cannot be assumed in advance.
+
+To address this, the **XML** files are scanned programmatically to identify all unique attribute keys appearing in row elements. This is achieved using a streaming **XML** parser so that large files can be processed efficiently without loading them entirely into memory.
+
+##### Step 2.1 — Scan XML rows to infer headers
+The function below iterates through row tags in an XML file and collects all observed attribute names. A scan limit is applied to balance completeness and performance.
+
+```{python}
+#| label: xml-header-extraction
+import xml.etree.ElementTree as ET
+
+def get_header_from_xml_file_row(file_path, row_tag='row', scan_limit=10000):
+    """
+        Scans an XML file for all unique attribute keys in 'row' tags.
+        scan_limit: Number of rows to check
+    """
+    headers = set()
+    rows_scanned = 0
+    try:
+        # Use iterparse to stream the file byte-by-byte
+        context = ET.iterparse(file_path, events=('start',))
+        for event, elem in context:
+            if elem.tag == row_tag:
+                # Add all current attribute keys to our global set
+                headers.update(elem.attrib.keys())
+                rows_scanned += 1
+
+                if rows_scanned >= scan_limit:
+                    break
+                    
+                # Clear to save memory space
+                elem.clear()
+        del context
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+    return sorted(list(headers))
+```
+**Output:** a sorted list of attribute names inferred directly from the XML structure.
+
+##### Step 2.2 — Define attribute sorting priority
+Once headers are extracted, they are ordered using a priority-based sorting strategy. Identifier fields and key timestamps are placed first, followed by remaining attributes. This produces more readable and consistent **CSV** files.
+
+```{python}
+def header_priority(attribute):
+    """
+        Takes the attribute checks it is "Id" gives priority 0.
+        Checks it Contains "Id" gives priority 1.
+        Else gives 2 priority.
+    """
+    if attribute == 'Id':
+        return (0, attribute)
+    elif attribute.endswith('Id'):
+        return (1, attribute)
+    elif attribute.endswith('Date'):
+        if attribute.startswith('Creation'):
+            return (2, attribute)
+        else:
+            return (3, attribute)
+    else:
+        return (99, attribute)
+```
+
+##### Step 2.3 — Apply priority-based header sorting
+The extracted headers are then sorted using the defined priority function
+```{python}
+def sort_hearder_attributes(header):
+    """
+        Takes Header with list of attributes and sorts by priority of attributes
+    """
+    header.sort(key=header_priority)
+    return header
+```
+
+##### Step 2.4 — Extract and store headers for all XML files
+The header extraction and sorting process is applied to every discovered **XML** file. The resulting schema is stored alongside file metadata for use in the **CSV** conversion step.
+```{python}
+#| label: apply-header-extraction
+for file_info in xml_files_info:
+    file_name = file_info['filename']
+    file_path = file_info['path']
+    header = get_header_from_xml_file_row(file_path)
+    header = sort_hearder_attributes(header)
+    file_info['header'] = header
+
+xml_files_info[:1]
+```
+
+#### Step 3 — Convert XML to CSV and load into pandas DataFrames
+At this stage, each **XML** file has an associated inferred and ordered header list (stored in xml_files_info). The next step converts each **XML** file into a **CSV** file by streaming through **<row ... />** elements, extracting attribute values using the stored headers, and writing them row-by-row to disk. Once the **CSV** files are created, they are loaded into pandas DataFrames for downstream analysis.
+
+##### Step 3.1 — Convert each XML file into a CSV file (streaming parse)
+```{python}
+#| label: xml-to-csv-conversion
+import os
+import csv
+import xml.etree.ElementTree as ET
+
+def convert_xml_to_csv(file_info):
+    
+    xml_path = file_info['path']
+    headers = file_info['header']
+
+    # Create csv filename by changing the extension
+    csv_path = xml_path.replace('.xml', '.csv')
+
+    print(f"Converting: {file_info['filename']} -> {os.path.basename(csv_path)}...")
+
+    with open(csv_path, 'w', newline= '', encoding= 'utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+        try:
+            context = ET.iterparse(xml_path, events=('end',))
+
+            for event, elem in context:
+                if elem.tag == 'row':
+                    # Extract data using headers as keys for attibutes
+                    row_data = [elem.get(h,"") for h in headers]
+                    writer.writerow(row_data)
+                    elem.clear()
+            del context
+        except Exception as e:
+            print(f"Error processing {file_info['filename']}: {e}")
+
+for file_info in xml_files_info:
+    convert_xml_to_csv(file_info)
+```
+
+##### Step 3.2 — Locate generated CSV files
+```{python}
+#| label: csv-file-discovery
+import os
+
+def get_csv_files_path_from_base_path(base_path):
+    """
+        Takes a base path and returns relative path for the xml files
+    """
+    results = []
+    # Ensure the path exists to avoid errors
+    if not os.path.exists(base_path):
+        return results
+        
+    for filename in os.listdir(base_path):
+        if filename.endswith('.csv'):
+            file_path = os.path.join(base_path, filename)
+            # Store as a dictionary so we can keep track of name and path
+            results.append({
+                'filename': filename,
+                'path': file_path,
+                'size': os.path.getsize(file_path)
+            })
+    # Sort the list of dictionaries by the 'size' key
+    results.sort(key=lambda x: x['size'])
+    return results
+
+csv_files_info = get_csv_files_path_from_base_path(BASE_PATH)
+csv_files_info[:3]
+```
+
+##### Step 3.3 — Load CSV files into pandas
+```{python}
+#| label: csv-to-pandas
+import pandas as pd
+
+def get_csv_file_into_pandas(file_path):
+    df = pd.read_csv(file_path)
+    return df
+
+def get_pd_datasets_from_csv_files(files_info):
+    df_dict = {}
+    for file_info in files_info:
+        df = get_csv_file_into_pandas(file_info['path'])
+        df_dict[file_info['filename']] =  df 
+    return df_dict
+
+se_ai_data_dict = get_pd_datasets_from_csv_files(csv_files_info)
+```
+\newpage
+
+##### Step 3.4 — Display the loaded DataFrames (Transposed results)
+```{python}
+#| label: display-dataframes
+from IPython.display import display
+
+for key, df in se_ai_data_dict.items():
+    print(key.replace(".csv", ""))
+    preview = df.head(2).T   # transpose => columns become rows
+    display(preview)
+```
+
+### Dataset Tables and Attribute Descriptions
+After converting the **XML** files into **CSV** format and loading them into pandas, the dataset is represented as a collection of relational-style tables. Each table captures a different aspect of the StackExchange platform (users, posts, tags, votes, etc.). Tables are linked using identifier fields such as **Id, PostId, and UserId**, allowing integrated analysis across multiple behaviours and entities.
+
+##### The list of tables and attributes are as follows :
+#### Tags Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the tag record. |
+| TagName | Name of the tag used to classify posts. |
+| Count | Number of times the tag has been applied. |
+| ExcerptPostId | Post ID containing the short tag excerpt, if available. |
+| WikiPostId | Post ID containing the tag wiki description, if available. |
+\newpage 
+
+#### Posts Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the post. |
+| PostTypeId | Indicates whether the post is a question or an answer. |
+| ParentId | For answers, the ID of the parent question. |
+| AcceptedAnswerId | For questions, the ID of the accepted answer (if any). |
+| CreationDate | Timestamp when the post was created. |
+| Score | Net score of the post (upvotes minus downvotes). |
+| ViewCount | Number of times the post has been viewed. |
+| Body | Main post content (HTML formatted). |
+| OwnerUserId | ID of the user who created the post. |
+| OwnerDisplayName | Display name of the post owner if user ID is missing. |
+| LastEditorUserId | User ID of the last editor, if available. |
+| LastEditorDisplayName | Display name of the last editor, if available. |
+| LastEditDate | Timestamp of the most recent edit. |
+| LastActivityDate | Timestamp of the last activity on the post. |
+| Title | Title of the post (typically questions only). |
+| Tags | List of tags stored as a single text field. |
+| AnswerCount | Number of answers associated with the post. |
+| CommentCount | Number of comments associated with the post. |
+| FavoriteCount | Number of times the post was marked as a favourite. |
+| ClosedDate | Timestamp when the post was closed, if applicable. |
+| CommunityOwnedDate | Timestamp when the post became community-owned. |
+| ContentLicense | License under which the post content is shared. |
+\newpage 
+
+#### Users Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the user. |
+| Reputation | Reputation score earned by the user. |
+| CreationDate | Timestamp when the user account was created. |
+| DisplayName | Public display name of the user. |
+| LastAccessDate | Timestamp of the user’s most recent access. |
+| WebsiteUrl | URL of the user’s personal website, if provided. |
+| Location | Free-text location string entered by the user. |
+| AboutMe | User profile biography text. |
+| Views | Number of profile views. |
+| UpVotes | Number of upvotes cast by the user. |
+| DownVotes | Number of downvotes cast by the user. |
+| AccountId | Global StackExchange account identifier, if available. |
+| ProfileImageUrl | URL of the user’s profile image, if available. |
+
+
+#### Comments Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the comment. |
+| PostId | Identifier of the post the comment is associated with. |
+| Score | Net score of the comment. |
+| Text | Content of the comment. |
+| CreationDate | Timestamp when the comment was created. |
+| UserId | ID of the user who wrote the comment, if available. |
+| UserDisplayName | Display name when user ID is not present. |
+| ContentLicense | License associated with the comment text. |
+
+
+#### Votes Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the vote record. |
+| PostId | Identifier of the post that received the vote. |
+| VoteTypeId | Encodes the type of vote (e.g., upvote, downvote, close). |
+| CreationDate | Timestamp when the vote was recorded. |
+| UserId | Identifier of the voting user, if available. |
+| BountyAmount | Bounty amount associated with the vote, if applicable. |
+
+
+#### Badges Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the badge award record. |
+| UserId | Identifier of the user who received the badge. |
+| Name | Name of the badge awarded. |
+| Date | Timestamp when the badge was awarded. |
+| Class | Numeric representation of badge tier (e.g., bronze/silver/gold). |
+| TagBased | Indicates whether the badge is associated with a specific tag. |
+
+
+#### PostHistory Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the post history record. |
+| PostHistoryTypeId | Encodes the type of history event (edit, creation, etc.). |
+| PostId | Identifier of the post associated with the history entry. |
+| RevisionGUID | Unique revision identifier for the change. |
+| CreationDate | Timestamp when the history event occurred. |
+| UserId | Identifier of the user responsible for the change. |
+| UserDisplayName | Display name when user ID is not present. |
+| Text | Text or content stored for the revision event. |
+| Comment | Optional comment describing the change. |
+| ContentLicense | License applicable to the revision content. |
+
+
+#### PostLinks Table
+
+| Column | Description |
+|------|-------------|
+| Id | Unique identifier for the post link record. |
+| CreationDate | Timestamp when the link was created. |
+| PostId | Identifier of the source post. |
+| RelatedPostId | Identifier of the related or linked post. |
+| LinkTypeId | Encodes the type of relationship between the two posts. |
+\newpage
+
+## Exploratory Analysis and Text Mining
+
+This section contains the required analysis outputs for Task 5C. It includes at least five non-trivial visualisations/tables, with at least three outputs based on information extracted from text using custom regular expressions. A map and a word cloud are also included. No pie charts are used.
+
+### Analysis Setup (create analysis-ready DataFrames)
+#### What is this doing
+This prepares the dataset for analysis by extracting the main tables from the previously loaded dictionary of DataFrames. It converts key date columns into datetime format, creates a `YearMonth` time bucket for trend analysis, and creates two derived DataFrames: `questions` (posts where `PostTypeId == 1`) and `answers` (posts where `PostTypeId == 2`). These derived tables are used consistently across the visualisations in this section.
+
+```{python}
+#| label: analysis-setup
+import re
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+posts = se_ai_data_dict.get("Posts.csv").copy()
+users = se_ai_data_dict.get("Users.csv").copy()
+comments = se_ai_data_dict.get("Comments.csv").copy()
+votes = se_ai_data_dict.get("Votes.csv").copy()
+tags = se_ai_data_dict.get("Tags.csv").copy()
+
+# Parse datetime columns
+for col in ["CreationDate", "LastActivityDate", "LastEditDate", "ClosedDate", "CommunityOwnedDate"]:
+    if col in posts.columns:
+        posts[col] = pd.to_datetime(posts[col], errors="coerce", utc=True)
+
+if "CreationDate" in users.columns:
+    users["CreationDate"] = pd.to_datetime(users["CreationDate"], errors="coerce", utc=True)
+
+if "CreationDate" in comments.columns:
+    comments["CreationDate"] = pd.to_datetime(comments["CreationDate"], errors="coerce", utc=True)
+
+# Time bucket for trend plots
+if "CreationDate" in posts.columns:
+    posts["YearMonth"] = posts["CreationDate"].dt.to_period("M").astype(str)
+
+# Split posts into questions and answers
+questions = posts[posts.get("PostTypeId") == 1].copy()
+answers = posts[posts.get("PostTypeId") == 2].copy()
+
+print(f'posts shape:{posts.shape}\nquestions shape:{questions.shape}\nanswers shape:{ answers.shape}')
+```
+#### Results
+The output shows three shapes: the total number of rows in `posts`, the number of question posts in `questions`, and the number of answer posts in `answers`. This confirms that the key tables are loaded correctly and that the analysis is based on an explicitly defined subset of posts (questions vs answers), which supports clear and reproducible comparisons throughout the report.
+\newpage
+
+### Regex Extraction 1: Post Tags (pipe-delimited)
+#### What is this doing
+In this StackExchange export, tags are stored as a single string separated by pipe characters, for example `|tag1|tag2|tag3|`.  
+This code uses a custom regular expression to extract each tag that occurs between `|` characters. The extracted tags are stored as a list (`tag_list`) and then reshaped into a long format where each row represents one (post, tag) pair. This long format is required for counting and trend analysis.
+```{python}
+#| label: tags-format-check
+questions[["Id","Tags"]].head(5)
+```
+```{python}
+#| label: regex-tags-extract
+import re
+
+# Regex: match any sequence of characters that appears AFTER a pipe and before the next pipe
+# Example: "|a|b|c|" -> ["a","b","c"]
+tag_pattern = r"(?<=\|)[^|]+"
+
+# Ensure we are working with question posts and that YearMonth exists
+tag_rows = questions[["Id", "YearMonth", "Tags"]].dropna(subset=["Tags"]).copy()
+
+# Extract tag list using regex
+tag_rows["tag_list"] = tag_rows["Tags"].apply(lambda s: re.findall(tag_pattern, str(s)))
+
+# Reshape into long form: one row per (post, tag)
+post_tags = (
+    tag_rows[["Id", "YearMonth", "tag_list"]]
+    .explode("tag_list")
+    .rename(columns={"tag_list": "Tag"})
+    .dropna(subset=["Tag"])
+)
+
+post_tags.head(10)
+```
+
+#### Results
+The preview show reals tag values in the `Tag` row (for example `neural-networks`, `machine-learning`, etc.).  
+This confirms that the regular expression is correctly extracting tags from the pipe-delimited text field and that the dataset has been reshaped into a usable long format for frequency and time-trend visualisations.
+
+####  Explanation of the regular expression
+
+The pattern `(?<=\|)[^|]+` is designed to extract individual tags from a pipe-delimited tag string such as `|neural-networks|machine-learning|`.
+
+- `(?<=\|)` is a *positive lookbehind* that ensures the match starts immediately after a pipe (`|`) character, without including the pipe itself in the result.
+- `[^|]+` matches one or more characters that are **not** a pipe character. This captures the full tag name until the next pipe is encountered.
+
+Together, this expression extracts only the tag text between pipes, producing clean tag names (e.g., `neural-networks`, `machine-learning`) without any delimiter characters.
+\newpage
+
+### Visualisation 1: Top 20 Tags (bar chart)
+This counts the frequency of each extracted tag across all question posts and plots the top 20 tags as a horizontal bar chart. This provides a high-level view of which topics dominate the community discussions.
+
+```{python}
+#| label: top-tags-plot
+top_tags = post_tags["Tag"].value_counts().head(20)
+
+plt.figure()
+top_tags.sort_values().plot(kind="barh")
+plt.xlabel("Number of question posts")
+plt.ylabel("Tag")
+plt.title("Top 20 Tags in Question Posts")
+plt.tight_layout()
+plt.show()
+```
+
+#### Results
+The bar chart shows a highly skewed distribution of tag usage. A small set of tags—**neural-networks, reinforcement-learning, machine-learning, and deep-learning**—dominates the dataset, indicating that discussion is primarily focused on contemporary machine learning and neural network approaches rather than broader or traditional AI topics. The presence of applied subfield tags such as **convolutional-neural-networks, natural-language-processing, and computer-vision** suggests substantial emphasis on practical, domain-specific problems. In contrast, lower-frequency tags (e.g., **terminology, comparison, reference-request**) imply that relatively fewer questions are conceptual or literature-oriented. Overall, the tag distribution supports the interpretation of the site as a practitioner-focused technical problem-solving forum and provides a strong basis for subsequent trend analysis over time.
+\newpage
+
+### Visualisation 2: Monthly trends for top 5 tags (multi-line)
+This analysis examines how discussion activity for the five most frequently used tags evolves over time. For each of the top five tags identified previously, the code counts how many question posts occur in each calendar month (`YearMonth`). The data are reshaped into a wide format so that each tag forms a separate time series.
+
+To improve readability and highlight underlying trends rather than short-term fluctuations, a three-month rolling average is applied to each time series. The resulting smoothed values are plotted together as a multi-line chart, allowing direct comparison of how interest in different topics changes over time. The x-axis is simplified by displaying labels at six-month intervals, and the legend is positioned outside the plot area to avoid visual clutter.
+```{python}
+#| label: tag-trends
+top5 = top_tags.head(5).index.tolist()
+
+trend = (
+    post_tags[post_tags["Tag"].isin(top5)]
+    .groupby(["YearMonth", "Tag"])
+    .size()
+    .reset_index(name="n")
+)
+
+trend_pivot = (
+    trend.pivot(index="YearMonth", columns="Tag", values="n")
+    .fillna(0)
+)
+
+# Convert YearMonth to datetime index
+trend_pivot.index = pd.to_datetime(trend_pivot.index + "-01", errors="coerce")
+trend_pivot = trend_pivot.sort_index()
+
+# Smooth the curves to reduce month-to-month noise (reader-friendly)
+trend_smooth = trend_pivot.rolling(window=3, min_periods=1).mean()
+
+plt.figure(figsize=(10, 5))
+
+for col in trend_smooth.columns:
+    plt.plot(
+        trend_smooth.index,
+        trend_smooth[col],
+        label=col,
+        linewidth=2
+    )
+
+# Fewer x-axis ticks (every 6 months)
+tick_step = 6
+ticks = trend_smooth.index[::tick_step]
+plt.xticks(ticks, [d.strftime("%Y-%m") for d in ticks], rotation=45, ha="right")
+
+plt.xlabel("Year-Month")
+plt.ylabel("Questions per month (3-month rolling average)")
+plt.title("Monthly Trend of Top 5 Tags (Smoothed)")
+plt.grid(True, alpha=0.3)
+
+# Legend outside to free space
+plt.legend(title="Tag", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
+
+plt.tight_layout()
+plt.show()
+```
+
+#### Results
+The smoothed time-series plot shows clear temporal variation in popularity across the five dominant tags. All tags follow a broadly similar pattern—gradual growth over time followed by stabilisation or decline—suggesting that engagement fluctuates in line with wider developments in the AI field. **Neural-networks, machine-learning, and deep-learning** maintain consistently high activity, indicating sustained relevance, whereas **reinforcement-learning** displays sharper peaks and troughs, consistent with episodic surges of interest linked to emerging methods or tools. Overall, the plot indicates stable long-term prominence of core topics alongside shorter-term shifts in subfield attention.
+
+### Regex Extraction 2: Extract URLs and Domains from `Comments.Text`
+Comments frequently contain hyperlinks to external resources such as documentation, research papers, or tutorials. We custom regular expression to extract URLs from comment text, then derives the domain portion of each URL. The final result is a frequency count of the most referenced external domains.
+
+
+```{python}
+#| label: regex-domains-extract
+url_pattern = r"(https?://[^\s<>\"]+)"
+
+src = comments[["Text"]].dropna().copy()
+src["urls"] = src["Text"].apply(lambda s: re.findall(url_pattern, s))
+
+urls = src.explode("urls").dropna(subset=["urls"])["urls"].copy()
+
+domains = (
+    urls.str.replace(r"^https?://", "", regex=True)
+        .str.split("/", n=1, expand=True)[0]
+        .str.lower()
+)
+
+top_domains = domains.value_counts().head(20)
+top_domains.head(10)
+```
+#### Results
+The extracted domains reveal clear and interpretable patterns in how users reference external information within comments.
+
+The most frequently referenced domain is **ai.stackexchange.com**, followed by other StackExchange network sites such as **chat.stackexchange.com, stats.stackexchange.com, and stackoverflow.com**. This indicates strong intra-network linking behaviour, where users frequently reference existing questions and answers to support explanations, avoid duplication, or provide canonical resources.
+
+Beyond the StackExchange ecosystem, several high-value external knowledge sources appear prominently. Wikipedia is commonly cited for definitions and general concepts, while arxiv.org and github.com reflect links to academic research papers and open-source code repositories. The presence of **towardsdatascience.com and youtube.com** suggests that users also rely on tutorials and explanatory media for learning and clarification.
+
+Overall, these results show that comment discussions are not isolated but are strongly connected to both internal community knowledge and external authoritative resources. This highlights the role of comments as a mechanism for contextualisation, reference sharing, and knowledge consolidation within technical discussions.
+
+####  Explanation of the regular expression
+To extract URLs from the free-text comments, a custom regular expression was defined as: `(https?://[^\s<>\"]+)`.
+
+This expression is designed to reliably capture web links embedded in unstructured comment text.
+- `https?://` matches both `http://` and `https://`, ensuring that older or legacy links are not excluded.
+- `[^\s<>\"]+` matches one or more characters that are not whitespace or common HTML delimiters, allowing the URL to be captured up to its natural endpoint.
+- The entire pattern is wrapped in parentheses so that each matched URL is returned as a standalone string.
+
+After extraction, each URL is further processed to derive its **domain name** by removing the protocol prefix (`https://`) and truncating the string at the first `/`. All domains are converted to lowercase to avoid duplication due to case differences. This approach demonstrates deliberate use of regular expressions for structured information extraction from noisy text data.
+\newpage 
+
+### Visualisation 3: Top 20 domains referenced (bar chart)
+Plots the 20 most frequently referenced external domains in comments. The result highlights which websites the community most commonly links to for evidence, tutorials, or documentation.
+
+```{python}
+#| label: top-domains-plot
+plt.figure()
+top_domains.sort_values().plot(kind="barh")
+plt.xlabel("Count of linked URLs (comments)")
+plt.ylabel("Domain")
+plt.title("Top 20 External Domains Referenced in Comments")
+plt.tight_layout()
+plt.show()
+```
+#### Results
+The bar chart summarises the **20 most frequently referenced external domains** in comment text, indicating which sources users rely on to support discussion. **ai.stackexchange.com** dominates, reflecting strong internal cross-linking to prior questions and answers. Other StackExchange sites (e.g., **chat, stats, datascience, math**) also appear prominently, suggesting cross-community engagement across AI, statistics, and mathematics.
+
+Outside the StackExchange network, **Wikipedia** and **arXiv** are frequently cited for background knowledge and research evidence, while **GitHub** and framework documentation sites (e.g., **TensorFlow, PyTorch**) reflect implementation-focused sharing. Platforms such as **Medium, Towards Data Science,** and **YouTube** further indicate the use of tutorials and explanatory materials. Overall, the domain distribution shows that comments **integrate internal community knowledge** with a broad set of **academic, technical, and educational resources**.
+
+### Regex Extraction 3: Parse user locations (for mapping)
+The `Location` field in the Users table is free-text and inconsistent (e.g., “Bangalore, India”, “NYC”, “UK”, “Berlin”). This code applies a regular-expression-based cleaning step to standardise location strings (remove extra punctuation, normalise whitespace), then extracts the final token as a rough “country/region candidate”. This candidate is used as a grouping key for mapping.
+
+This step turns messy free-text `Location` values into a short, ordered list of country-like candidates that are easier to map reliably
+
+#### Step 1: Clean and standardise (`LocationClean`)
+First, the raw `Location` text is normalised into a predictable format so downstream matching is consistent. This includes lowercasing, removing accents, stripping obvious noise, and enforcing a stable “comma-separated” structure.
+
+#### Step 1: Generate and try candidates (`CountryCandidate`)
+Next, the cleaned string is converted into a small ordered set of candidates (e.g., **rightmost comma segment**, full cleaned string, last word, last two words). Candidates are tried in order so the most likely country fragment is checked first.
+
+#### Explaination of the regular expression
+Regex is used because location strings share common patterns but are not consistently formatted. Regex removes noise and enforces structure by:
+
+- Removing URLs/emails (not geographic information)
+- Removing bracketed notes like “(work)” or “[temp]”.
+- Normalising separators (-, /, |) into commas so the text behaves like location “parts”.
+- Stripping address-like tails after keywords (e.g., “road”, “street”, “near”) that can confuse country matching 
+- Filtering unwanted characters and collapsing repeated spaces/commas into a clean, stable output
+
+Result: `CountryCandidate` is derived from cleaner, standardised text, improving mapping accuracy and reducing false matches.
+
+```{python}
+#| label: country-mapper-setup
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import pycountry
+from difflib import get_close_matches
+
+
+# =============================================================================
+# 1) Cleaning + extraction (mostly regex)
+# =============================================================================
+
+# Remove obvious non-location “tails” (addresses / directions / system noise)
+_NOISE_TAIL_RE = re.compile(
+    r"""
+    \b(
+        near|opposite|behind|next\s+to|front\s+of|
+        floor|road|street|sector|phase|block|
+        bank|hdfc|
+        setidentifier|getlocation|tost
+    )\b.*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Remove filler words that often appear as “locations”
+_FILLER_RE = re.compile(
+    r"\b(on the|in the|at the|server|farm|internet|everywhere|somewhere|nowhere)\b",
+    re.IGNORECASE,
+)
+
+# Remove URLs + emails
+_URL_RE = re.compile(r"(https?://\S+|www\.\S+)", re.IGNORECASE)
+_EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b", re.IGNORECASE)
+
+# Remove bracketed text (often jokes / extra info)
+_BRACKETS_RE = re.compile(r"[\(\[\{].*?[\)\]\}]")
+
+
+def _strip_accents(s: str) -> str:
+    """Österreich -> osterreich (unicode normalize)."""
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
+
+def normalize_location_text(x: object) -> str:
+    """
+    Normalize raw free-text locations into a comparable, regex-cleaned form.
+    Heavily regex-based, intentionally conservative (keeps commas/hyphens).
+    """
+    if not isinstance(x, str):
+        return ""
+
+    s = x.strip().lower()
+    s = _strip_accents(s)
+
+    # Remove urls/emails + bracket notes
+    s = _URL_RE.sub(" ", s)
+    s = _EMAIL_RE.sub(" ", s)
+    s = _BRACKETS_RE.sub(" ", s)
+
+    # Normalize common separators to commas
+    s = re.sub(r"\s*[-/|]\s*", ", ", s)  # dash/slash/pipe -> comma
+
+    # Drop “noise tails” (addresses etc.)
+    s = _NOISE_TAIL_RE.sub("", s)
+
+    # Keep letters, spaces, commas, hyphens only
+    s = re.sub(r"[^a-z,\s\-]", " ", s)
+
+    # Normalize comma spacing + collapse whitespace
+    s = re.sub(r"\s*,\s*", ", ", s)     # normalize commas
+    s = re.sub(r"(,\s*){2,}", ", ", s)  # collapse repeated commas
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r",+\s*$", "", s).strip()
+
+    # Remove filler words if they remain
+    s = _FILLER_RE.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Fix a common encoding pattern: "t rkiye" -> "turkiye"
+    # (single letter + space + rest-of-word). Apply repeatedly.
+    s = re.sub(r"\b([a-z])\s+([a-z]{2,})\b", r"\1\2", s)
+
+    return s
+
+
+def extract_candidates(cleaned: str) -> List[str]:
+    """
+    Produce a small set of “best guess” candidates from a cleaned location:
+    - rightmost comma segment
+    - full cleaned string
+    - last token (word)
+    - rightmost 2-segment phrase (e.g., "new york")
+    Order matters: earlier = preferred.
+    """
+    if not cleaned:
+        return []
+
+    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    cands: List[str] = []
+
+    if parts:
+        cands.append(parts[-1])         # rightmost segment
+        cands.append(", ".join(parts))  # full
+
+    words = cleaned.split()
+    if words:
+        cands.append(words[-1])                         # last word
+        if len(words) >= 2:
+            cands.append(" ".join(words[-2:]))         # last two words
+
+    # De-dup while preserving order
+    seen = set()
+    out = []
+    for c in cands:
+        if c and c not in seen:
+            out.append(c)
+            seen.add(c)
+    return out
+
+
+# =============================================================================
+# 2) Country vocabulary + mapping rules
+# =============================================================================
+
+def _build_pycountry_vocab() -> Tuple[Dict[str, str], List[str]]:
+    """
+    Returns:
+      country_lookup: variant -> canonical (both normalized)
+      country_vocab: list of variants for fuzzy matching
+    """
+    lookup: Dict[str, str] = {}
+    vocab: List[str] = []
+
+    for c in pycountry.countries:
+        canonical = normalize_location_text(c.name)
+        if canonical:
+            lookup[canonical] = canonical
+            vocab.append(canonical)
+
+        if getattr(c, "official_name", None):
+            v = normalize_location_text(c.official_name)
+            if v:
+                lookup[v] = canonical
+                vocab.append(v)
+
+        if getattr(c, "common_name", None):
+            v = normalize_location_text(c.common_name)
+            if v:
+                lookup[v] = canonical
+                vocab.append(v)
+
+        # alpha_2 / alpha_3 codes as variants
+        if getattr(c, "alpha_2", None):
+            lookup[c.alpha_2.lower()] = canonical
+        if getattr(c, "alpha_3", None):
+            lookup[c.alpha_3.lower()] = canonical
+
+    vocab = sorted(set(vocab))
+    return lookup, vocab
+
+
+# Small, easy-to-extend aliases (keep minimal; add only what your data needs)
+COUNTRY_ALIAS: Dict[str, Optional[str]] = {
+    # Abbreviations / common
+    "us": "united states",
+    "usa": "united states",
+    "u s a": "united states",
+    "uk": "united kingdom",
+    "gb": "united kingdom",
+    "uae": "united arab emirates",
+
+    # Local-language / common alternates
+    "turkiye": "turkey",
+    "espana": "spain",
+    "deutschland": "germany",
+    "brasil": "brazil",
+    "osterreich": "austria",
+    "schweiz": "switzerland",
+    "nederland": "netherlands",
+    "sverige": "sweden",
+    "polska": "poland",
+
+    # Not countries / should remain unmapped
+    "european union": None,
+    "scandinavia": None,
+    "middle east": None,
+    "earth": None,
+    "world": None,
+    "internet": None,
+    "unknown": None,
+}
+
+
+# US states (2-letter codes + common names) → United States
+US_STATE_CODES = {
+    "al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","in","ia","ks","ky","la","me","md",
+    "ma","mi","mn","ms","mo","mt","ne","nv","nh","nj","nm","ny","nc","nd","oh","ok","or","pa","ri","sc",
+    "sd","tn","tx","ut","vt","va","wa","wv","wi","wy","dc"
+}
+US_STATE_NAMES = {
+    "california","texas","florida","washington","illinois","pennsylvania","ohio","georgia","virginia",
+    "massachusetts","new york","north carolina","south carolina","new jersey","colorado","arizona",
+    "michigan","maryland","utah","oregon","oklahoma","indiana","missouri","alaska","tennessee",
+    "alabama","vermont","connecticut","delaware","montana","rhode island","idaho","louisiana"
+}
+
+# India states / UTs → India
+INDIA_ADMIN = {
+    "andhra pradesh","arunachal pradesh","assam","bihar","chhattisgarh","goa","gujarat","haryana",
+    "himachal pradesh","jharkhand","karnataka","kerala","madhya pradesh","maharashtra","manipur",
+    "meghalaya","mizoram","nagaland","odisha","orissa","punjab","rajasthan","sikkim","tamil nadu",
+    "telangana","tripura","uttar pradesh","uttarakhand","west bengal",
+    "andaman and nicobar islands","chandigarh","dadra and nagar haveli","daman and diu",
+    "delhi","nct of delhi","jammu and kashmir","ladakh","lakshadweep","puducherry","pondicherry"
+}
+
+
+# Optional: tiny “city→country” seeds (keep SMALL; extend only if needed)
+CITY_ALIAS: Dict[str, str] = {
+    "london": "united kingdom",
+    "paris": "france",
+    "berlin": "germany",
+    "mumbai": "india",
+    "bengaluru": "india",
+    "bangalore": "india",
+    "new delhi": "india",
+    "dubai": "united arab emirates",
+}
+
+
+@dataclass
+class CountryMapper:
+    """
+    Maps cleaned candidate strings to a canonical country name (normalized),
+    with an audit trail of which strategy succeeded.
+    """
+    fuzzy_cutoff: float = 0.88
+    country_lookup: Dict[str, str] = field(default_factory=dict)
+    country_vocab: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.country_lookup or not self.country_vocab:
+            self.country_lookup, self.country_vocab = _build_pycountry_vocab()
+
+    def _map_one_token(self, tok: str) -> Optional[str]:
+        """
+        Map a single normalized token to a country.
+        Returns canonical normalized country name, or None if not mapped.
+        """
+        if not tok:
+            return None
+
+        tok = tok.strip().lower()
+
+        # 1) explicit "not a country"
+        if tok in COUNTRY_ALIAS and COUNTRY_ALIAS[tok] is None:
+            return None
+
+        # 2) admin/state rules
+        if tok in INDIA_ADMIN:
+            return "india"
+        if tok in US_STATE_CODES or tok in US_STATE_NAMES:
+            return "united states"
+
+        # 3) city seed overrides
+        if tok in CITY_ALIAS:
+            return CITY_ALIAS[tok]
+
+        # 4) explicit alias → canonical
+        if tok in COUNTRY_ALIAS and isinstance(COUNTRY_ALIAS[tok], str):
+            tok = COUNTRY_ALIAS[tok]  # remap token to country string
+
+        # 5) exact lookup via pycountry variants (+ alpha2/alpha3)
+        if tok in self.country_lookup:
+            return self.country_lookup[tok]
+
+        # 6) fuzzy match against country vocab
+        m = get_close_matches(tok, self.country_vocab, n=1, cutoff=self.fuzzy_cutoff)
+        if m:
+            return self.country_lookup.get(m[0], m[0])
+
+        return None
+
+    def map_candidates(self, candidates: Iterable[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Try candidates in order. Returns:
+          (country, method, matched_candidate)
+        """
+        for cand in candidates:
+            tok = normalize_location_text(cand)
+            out = self._map_one_token(tok)
+            if out:
+                return out, "candidate_scan", cand
+        return None, None, None
+
+
+# =============================================================================
+# 3) Pipeline with audit: "which step mapped how many rows"
+# =============================================================================
+
+def map_locations_with_audit(
+    users: pd.DataFrame,
+    id_col: str = "Id",
+    location_col: str = "Location",
+    fuzzy_cutoff: float = 0.88,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Main entry point.
+
+    Returns:
+      loc_df: per-user rows (Id, Location, LocationClean, CountryMapped, MethodUsed, MatchedCandidate)
+      audit_df: per-step mapping counts
+    """
+    loc_df = users[[id_col, location_col]].dropna(subset=[location_col]).copy()
+    loc_df["LocationClean"] = loc_df[location_col].map(normalize_location_text)
+
+    mapper = CountryMapper(fuzzy_cutoff=fuzzy_cutoff)
+
+    # Prepare candidate lists (vectorized -> apply, but cheap)
+    loc_df["Candidates"] = loc_df["LocationClean"].map(extract_candidates)
+
+    # We will try sequential strategies on remaining unmapped rows
+    loc_df["CountryMapped"] = pd.NA
+    loc_df["MethodUsed"] = pd.NA
+    loc_df["MatchedCandidate"] = pd.NA
+
+    audit_rows = []
+    total = len(loc_df)
+
+    def _apply_step(step_name: str, series_of_candidates: pd.Series):
+        nonlocal loc_df
+
+        mask = loc_df["CountryMapped"].isna()
+        if mask.sum() == 0:
+            audit_rows.append(
+                {"step": step_name, "newly_mapped": 0, "cumulative_mapped": total, "remaining": 0}
+            )
+            return
+
+        # To speed up: map only unique candidate “signatures”
+        # (join list into a single string key, then cache results)
+        keys = series_of_candidates.loc[mask].map(lambda c: tuple(c) if isinstance(c, list) else tuple([c]))
+        unique_keys = keys.unique()
+
+        cache: Dict[Tuple[str, ...], Tuple[Optional[str], Optional[str], Optional[str]]] = {}
+        for k in unique_keys:
+            country, method, matched = mapper.map_candidates(k)
+            cache[k] = (country, method, matched)
+
+        mapped = keys.map(lambda k: cache[k][0])
+        method = keys.map(lambda k: cache[k][1])
+        matched = keys.map(lambda k: cache[k][2])
+
+        before = loc_df["CountryMapped"].notna().sum()
+        loc_df.loc[mask, "CountryMapped"] = mapped.values
+        # record method only where we mapped successfully in this step
+        just_mapped = mask & loc_df["CountryMapped"].notna() & loc_df["MethodUsed"].isna()
+        loc_df.loc[just_mapped, "MethodUsed"] = step_name
+        loc_df.loc[just_mapped, "MatchedCandidate"] = matched.loc[just_mapped].values
+
+        after = loc_df["CountryMapped"].notna().sum()
+        newly = int(after - before)
+        audit_rows.append(
+            {
+                "step": step_name,
+                "newly_mapped": newly,
+                "cumulative_mapped": int(after),
+                "remaining": int(total - after),
+            }
+        )
+
+    # ---- Step 1: scan extracted candidates (rightmost segment first etc.)
+    _apply_step("step1_candidates", loc_df["Candidates"])
+
+    # ---- Step 2: fallback = try full cleaned string only (sometimes candidates miss it)
+    _apply_step("step2_full_cleaned", loc_df["LocationClean"].map(lambda s: [s] if isinstance(s, str) else []))
+
+    # ---- Final tidy columns
+    loc_df.drop(columns=["Candidates"], inplace=True)
+
+    audit_df = pd.DataFrame(audit_rows)
+    return loc_df, audit_df
+
+loc_df, audit_df = map_locations_with_audit(users, id_col="Id", location_col="Location")
+```
+#### Results: Overall summary
+
+This section reports how many user records contained a `Location` value, how many of those were successfully mapped to a valid country, how many remained unmapped, and the overall mapping success rate.
+
+- **Rows with a location**: records where `Location` was present (non-missing).
+- **Mapped rows**: records where a valid country label was produced.
+- **Unmapped rows**: records where no country could be confidently inferred.
+- **Mapped %**: mapping success rate among rows that had a location value.
+
+```{python}
+#| label: results-overall-summary-calc
+#| echo: false
+#| warning: false
+#| message: false
+
+# Compute counts
+rows_with_location = int(len(loc_df))
+mapped_rows = int(loc_df["CountryMapped"].notna().sum())
+unmapped_rows = rows_with_location - mapped_rows
+mapped_pct = (mapped_rows / rows_with_location * 100) if rows_with_location else 0
+
+# Create a results table for the PDF
+overall_summary = pd.DataFrame([{
+    "Rows with a location": rows_with_location,
+    "Mapped rows": mapped_rows,
+    "Unmapped rows": unmapped_rows,
+    "Mapped %": round(mapped_pct, 2)
+}])
+
+overall_summary
+```
+\newpage
+
+### Visualisation 4: Users by Countries World Map
+This choropleth map summarises the geographic distribution of users by mapping the free-text `Users.Location` field to a standardised `CountryMapped` value and counting unique users per country. Countries are shaded using **10 quantile bands (deciles)**: darker blues indicate countries in higher user-count bands relative to other mapped countries, while lighter blues indicate lower bands. Countries shown in **grey** represent “No mapped users”, reflecting missing, ambiguous, or unmappable location entries (or zero mapped users for that country). The legend reports the user-count range for each decile, and the annotation box highlights the five highest-count countries.
+
+```{python}
+#| label: vis4-users-world-map-step1
+
+import pandas as pd
+
+# Join Users -> loc_df (Id is the key)
+loc_keep = loc_df[["Id", "CountryMapped"]].copy()
+loc_keep["CountryMapped"] = loc_keep["CountryMapped"].astype("string").str.strip()
+loc_keep = loc_keep.drop_duplicates(subset=["Id"], keep="last")
+
+users_loc = users.merge(loc_keep, on="Id", how="left")
+
+# Basic mapping coverage summary
+total_users = users_loc["Id"].nunique()
+mapped_users = users_loc.loc[
+    users_loc["CountryMapped"].notna() & (users_loc["CountryMapped"] != ""),
+    "Id"
+].nunique()
+
+unmapped_users = total_users - mapped_users
+mapped_pct = (mapped_users / total_users * 100) if total_users else 0
+
+summary_df = pd.DataFrame([{
+    "Total users": total_users,
+    "Users with mapped country": mapped_users,
+    "Users without mapped country": unmapped_users,
+    "Mapped %": round(mapped_pct, 2)
+}])
+```
+```{python}
+#| label: vis4-users-world-map-country-counts
+
+# Aggregate distinct users per mapped country
+users_mapped = users_loc[
+    users_loc["CountryMapped"].notna() & (users_loc["CountryMapped"] != "")
+].copy()
+
+country_counts = (
+    users_mapped
+    .groupby("CountryMapped")["Id"]
+    .nunique()
+    .reset_index(name="UserCount")
+    .sort_values("UserCount", ascending=False)
+)
+
+```
+```{python}
+#| label: vis4-users-world-map-quantile-bands
+
+
+import os
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import pycountry
+from matplotlib.patches import Patch
+
+# --- ISO3 mapping helper ---
+def to_iso3(country_name: str):
+    if country_name is None or pd.isna(country_name):
+        return None
+    name = str(country_name).strip()
+
+    aliases = {
+        "USA": "United States",
+        "US": "United States",
+        "U.S.": "United States",
+        "UAE": "United Arab Emirates",
+        "UK": "United Kingdom",
+        "Russia": "Russian Federation",
+        "South Korea": "Korea, Republic of",
+        "North Korea": "Korea, Democratic People's Republic of",
+        "Vietnam": "Viet Nam",
+        "Iran": "Iran, Islamic Republic of",
+        "Syria": "Syrian Arab Republic",
+        "Bolivia": "Bolivia, Plurinational State of",
+        "Tanzania": "Tanzania, United Republic of",
+        "Venezuela": "Venezuela, Bolivarian Republic of",
+        "Moldova": "Moldova, Republic of",
+        "Palestine": "Palestine, State of",
+    }
+    name = aliases.get(name, name)
+
+    c = pycountry.countries.get(name=name)
+    if c:
+        return c.alpha_3
+    try:
+        return pycountry.countries.search_fuzzy(name)[0].alpha_3
+    except Exception:
+        return None
+
+# --- Build ISO3 counts ---
+cc = country_counts.copy()
+cc["iso3"] = cc["CountryMapped"].apply(to_iso3)
+cc = cc.dropna(subset=["iso3"]).copy()
+
+# --- Load world polygons ---
+shp_path = "data/naturalearth_admin0/ne_110m_admin_0_countries.shp"
+world = gpd.read_file(shp_path)
+
+world["iso3"] = world["ADM0_A3"].astype(str).str.strip()
+world.loc[world["iso3"].isin(["-99", "nan", "None", ""]), "iso3"] = pd.NA
+if "NAME" in world.columns:
+    world = world[world["NAME"] != "Antarctica"].copy()
+
+# --- Merge counts ---
+plot_df = world.merge(cc[["iso3", "UserCount"]], on="iso3", how="left")
+plot_df["UserCount"] = plot_df["UserCount"].fillna(0).astype(int)
+
+# ------------------------------------------------------------
+# Quantile bands (only on mapped countries where UserCount > 0)
+# ------------------------------------------------------------
+mapped_counts = plot_df.loc[plot_df["UserCount"] > 0, "UserCount"]
+
+# Use 10 quantiles (deciles)
+q = 10
+
+# If too few unique values, reduce q automatically
+if mapped_counts.nunique() < q:
+    q = max(2, mapped_counts.nunique())
+
+# Create quantile categories
+plot_df["QuantileBand"] = pd.qcut(
+    plot_df["UserCount"].where(plot_df["UserCount"] > 0),
+    q=q,
+    duplicates="drop"
+)
+
+# Convert interval bins to friendly labels like "Q1: 1–5"
+band_labels = []
+if plot_df["QuantileBand"].notna().any():
+    intervals = plot_df["QuantileBand"].cat.categories
+    for i, interval in enumerate(intervals, start=1):
+        lo = int(interval.left)
+        hi = int(interval.right)
+        band_labels.append(f"Q{i}: {lo}–{hi}")
+
+    plot_df["QuantileBand"] = plot_df["QuantileBand"].cat.rename_categories(band_labels)
+
+# ------------------------------------------------------------
+# Colours
+# ------------------------------------------------------------
+no_mapped_color = "#e6e6e6"  # light grey
+
+# 10-step sequential palette (light -> dark) suitable for PDF
+quantile_palette = [
+    "#f7fbff", "#deebf7", "#c6dbef", "#9ecae1", "#6baed6",
+    "#4292c6", "#2171b5", "#08519c", "#08306b", "#041f4a"
+]
+quantile_palette = quantile_palette[:len(band_labels)]
+
+band_to_color = {lab: quantile_palette[i] for i, lab in enumerate(band_labels)}
+
+# Ensure FillColor is plain object dtype (avoids categorical fill issues)
+plot_df["FillColor"] = plot_df["QuantileBand"].map(band_to_color).astype("object")
+plot_df["FillColor"] = plot_df["FillColor"].where(plot_df["FillColor"].notna(), no_mapped_color)
+
+# --- Plot ---
+os.makedirs("figures", exist_ok=True)
+out_path = "figures/vis4_users_by_country_world_map.png"
+
+fig, ax = plt.subplots(figsize=(14, 7))
+
+plot_df.plot(
+    ax=ax,
+    color=plot_df["FillColor"],
+    linewidth=0.3,
+    edgecolor="0.5"
+)
+
+ax.set_title("Users by Country (Mapped from Users.Location) — 10 Quantile Bands", pad=12)
+ax.set_axis_off()
+
+# --- Legend (No mapped users + quantile bands in order) ---
+legend_handles = [Patch(facecolor=no_mapped_color, edgecolor="0.5", label="No mapped users")]
+for lab in band_labels:
+    legend_handles.append(Patch(facecolor=band_to_color[lab], edgecolor="0.5", label=lab))
+
+top5 = (
+    country_counts.sort_values("UserCount", ascending=False)
+    .head(5)
+    .reset_index(drop=True)
+)
+
+lines = ["Top 5 mapped countries:"]
+for i, row in top5.iterrows():
+    lines.append(f"{i+1}. {row['CountryMapped']}: {row['UserCount']:,}")
+
+ax.text(
+    0.99, 0.02,
+    "\n".join(lines),
+    transform=ax.transAxes,
+    ha="right", va="bottom",
+    fontsize=9,
+    bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="0.5", alpha=0.9)
+)
+ax.legend(
+    handles=legend_handles,
+    title="Mapped users per country (deciles)",
+    loc="lower left",
+    frameon=True
+)
+
+plt.savefig(out_path, dpi=220, bbox_inches="tight")
+plt.close(fig)
+
+```
+```{python}
+#| label: vis4-users-world-map-display
+from PIL import Image
+Image.open("figures/vis4_users_by_country_world_map.png")
+```
+#### Results
+Overall, the results indicate a **highly concentrated** user distribution: the **United States** is the dominant contributor, followed by **India, Germany, Canada,** and the **United Kingdom**. Most remaining countries fall into lower deciles, indicating comparatively smaller user counts, with limited mapped representation in several regions. These patterns should be interpreted as an approximation because the underlying location data is self-reported and mapping is best-effort.
+\newpage
+
+### Visualisation 5: Word Cloud of Question Titles
+This visualisation provides a fast, high-level view of the most common concepts discussed in the **AI StackExchange** dataset by generating a word cloud from question `titles`. Titles are used because they are concise and usually contain the core topic of each post, making them well-suited for keyword frequency visualisation.
+```{python}
+#| label: wordcloud-question-titles
+#| warning: false
+#| message: false
+
+# 1) Import WordCloud (install if missing)
+try:
+    from wordcloud import WordCloud, STOPWORDS
+except ImportError:
+    import sys
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "wordcloud"])
+    from wordcloud import WordCloud, STOPWORDS
+
+import re
+import matplotlib.pyplot as plt
+
+# 2) Build a clean text corpus from question titles
+#    (questions dataframe is created earlier in your analysis-setup chunk)
+titles = questions["Title"].dropna().astype(str)
+
+def clean_title_text(s: str) -> str:
+    s = s.lower().strip()
+    # remove urls (rare in titles, but safe)
+    s = re.sub(r"http\S+|www\.\S+", " ", s)
+    # keep letters and spaces only
+    s = re.sub(r"[^a-z\s]", " ", s)
+    # collapse extra whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+clean_titles = titles.apply(clean_title_text)
+text_corpus = " ".join(clean_titles.tolist())
+text_corpus = " ".join([w for w in text_corpus.split() if len(w) >= 3])
+
+# 3) Stopwords: start with defaults + add a few dataset-generic fillers
+custom_stopwords = set(STOPWORDS)
+custom_stopwords.update([
+    # generic question filler
+    "using", "use", "used", "one", "two", "also", "like",
+    "help", "need", "know", "best", "different", "make",
+    "question", "questions", "answer", "answers",
+    "problem", "difference", "time", "number", "based",
+
+    # broad ML plumbing
+    "model", "models",
+    "data", "dataset", "datasets",
+    "training", "train", "trained",          # fixed typo
+    "neural", "network", "networks",
+    "algorithm", "algorithms",
+    "function", "functions",
+    "layer", "layers",
+    "loss",
+    "weight", "weights",                     # fixed typo
+    "value", "values",
+    "vector", "vectors",
+    "gradient", "gradients",
+    "classification", "regression", "accuracy",
+
+    # general phrasing / low-information
+    "find", "get", "give", "given", "without",
+    "better", "improve", "specific", "change",
+    "first", "new", "simple", "real", "will",
+
+    # generic analysis words
+    "mean", "rate", "size", "space", "multiple", "single",
+    "parameter", "parameters", "distribution",
+    "calculate", "calculation", "evaluation", "validation", "batch",
+
+    # generic task terms
+    "task", "text", "label", "inputs", "outputs", "search",
+
+    # token noise
+    "s", "t", "m", "q", "x", "y", "z",
+
+    # OPTIONAL (uncomment if you want more specific topics to pop)
+    # "deep", "intelligence", "system", "architecture"
+])
+
+custom_stopwords.update([
+    # umbrella / too-broad AI words
+    "ai", "artificial", "intelligence", "machine",
+
+    # generic filler still showing
+    "possible", "work", "way", "set", "non",
+
+    # singular forms (your list has plural only)
+    "input", "output",
+
+    # common low-info words in titles
+    "result", "results", "paper"
+])
+custom_stopwords.update([
+    "action", "state", "reward", "policy", "agent", "game"
+])
+custom_stopwords.update([
+    "method","methods", "system", "feature", "features", "architecture",
+    "environment", "step", "good", "human", "word", "ob"
+])
+custom_stopwords.update([
+    # generic verbs / phrasing in titles
+    "learn", "predict", "solve", "example", "update", "build", "test", "order",
+    "problem", "problems", "method", "methods",
+
+    # generic class-related words (not the task type "classification")
+    "class", "classes",
+
+    "recognition", "classification", "activation"
+])
+custom_stopwords.update([
+    "ob", "multi", "series", "variable", "term", "context","learning","deep","computer","create","high","labels","knowledge","take","instead","many","exactly","filter","point","understanding","episode","technique","implementation","random","understand","design","fine","net","examples","another","part","zero","score","differences","lenght","choose","systems","implement","current","kind","righ","critic","well","type","general","approach","similar","back","self"
+])
+# 4) Generate and display the word cloud
+wc = WordCloud(
+    width=2000,
+    height=1000,
+    background_color="#fafafa",
+    stopwords=custom_stopwords,
+    collocations=False,
+    max_words=150,          # fewer words -> larger, more readable
+    margin=4,               # space between words
+    prefer_horizontal=0.9,  # reduces vertical clutter
+    random_state=42         # reproducible layout
+).generate(text_corpus)
+
+
+plt.figure(figsize=(14, 7), dpi=500)
+plt.imshow(wc, interpolation="bilinear")
+plt.axis("off")
+plt.title("Word Cloud of AI StackExchange Question Titles")
+plt.tight_layout()
+plt.show()
+```
+#### Results
+The word cloud summarises the most frequent terms in cleaned **AI StackExchange question titles** after removing common stopwords and generic phrasing. The most prominent terms—**reinforcement, transformer, cnn, lstm, convolutional, attention,** and **embedding**—indicate that discussions are strongly centred on reinforcement learning and contemporary neural network architectures. Reinforcement learning is further reflected through terms such as **dqn** and **reward**. Application-oriented terms including detection and language suggest sustained interest in **computer vision** and **NLP**-related questions. Overall, the distribution of terms provides a coherent high-level view of dominant themes in the dataset.
+\newpage 
+
+## Data Privacy and Ethics
+This analysis uses the Stack Exchange data dump, which contains user-generated content and user profile metadata. Although the dataset is publicly available, privacy risks still exist because seemingly non-sensitive fields can become identifying when combined (e.g., location text, posting behaviour over time, and external links). The purpose of this section is to document the main risks and the steps taken to mitigate harm while preserving analytical value.
+
+### Privacy risks and potential harms
+**Re-identification risk**. User location is self-reported free text and may include highly specific information (e.g., suburb, workplace, school, or unique phrasing). When combined with other attributes (activity volume, rare tags, unique titles, or link patterns), this can increase the likelihood of inferring an individual’s identity, even if usernames are not used.
+
+**Profiling and sensitive inference**. Behavioural signals (topic preferences, posting frequency, and external domains shared) can be used to infer personal interests or professional background. While this report focuses on aggregate trends, such signals can support profiling if analysed at user level.
+
+**External link exposure**. Extracted URLs and domains may point to personal websites, repositories, or social profiles. Publishing specific URLs can unintentionally amplify exposure or facilitate doxxing, especially if links contain names, email handles, or personal pages.
+
+### Ethical handling and mitigation measures
+To reduce these risks, the analysis is reported at an **aggregated level**. Results are presented as overall distributions and trends (e.g., top tags, domain frequencies, topic timelines, and country-level mapping) rather than individual-level behaviours. Location information is converted into **country-level categories** to support geographic interpretation while avoiding disclosure of precise places. Similarly, link analysis is based on **domain frequency**, not on full URLs, and no attempt is made to associate domains or locations with particular users.
+
+Where free-text fields are inherently messy (e.g., location strings), the mapping process is explicitly treated as **best-effort** and is used only for broad descriptive summaries. Unmapped or ambiguous values are not forced into potentially incorrect categories, which helps avoid misleading conclusions and prevents overconfident claims about individuals or small groups.
+
+### Responsible reporting choices'
+This report avoids reproducing content that could identify individuals (e.g., unique titles, rare location strings, personal links, email-like text). Visualisations are designed to communicate **population-level insights**, and the discussion interprets patterns cautiously given the limitations of self-reported metadata and potential sampling bias in archived dumps.
+
+### Data stewardship and licensing note
+The Stack Exchange network content is distributed under a Creative Commons licence (CC BY-SA) and the dumps are intended for research and analysis. This work focuses on derived summaries and does not republish large volumes of post content. Outputs are therefore limited to descriptive statistics and visualisations that support the learning objectives while minimising privacy risk.
+
+## Conclusion and Possible Extensions
+This report demonstrated an end-to-end data wrangling workflow using the Stack Exchange data dump, converting multiple XML tables into structured CSV files and analysis-ready pandas DataFrames. The visual analyses highlighted a highly skewed distribution of tag usage, indicating that a small set of dominant topics accounts for a large share of activity. The time-series trends further showed that while core machine learning topics remain consistently prominent, engagement intensity varies over time, suggesting periods of rising and declining interest that likely reflect broader shifts in the AI field. Analysis of external domains indicated that a relatively small number of sources are repeatedly referenced, supporting the interpretation that community knowledge sharing relies on a limited set of commonly cited platforms. The geographic mapping (at country level) and the word cloud of question titles provided complementary evidence that participation is globally distributed but uneven, and that recurring title terms reflect common problem types and concepts discussed on the site.
+
+These findings should be interpreted cautiously because several fields are user-generated and noisy. In particular, the location field is self-reported free text and can be ambiguous, incomplete, or non-geographic, and URL/domain extraction reflects only what users choose to share rather than a comprehensive record of resources used. A natural extension would be to analyse tag co-occurrence networks to identify clusters of related topics and their evolution over time. Further work could apply topic modelling to question titles or bodies to quantify thematic structure beyond tags, and examine user cohorts (e.g., newcomers vs established users) to better understand participation patterns. Finally, location mapping could be improved using more robust cleaning and candidate matching strategies while maintaining aggregation to protect privacy.
