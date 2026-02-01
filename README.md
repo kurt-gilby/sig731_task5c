@@ -17,7 +17,7 @@ The report reads the dataset from:
 
 ## Recommended “one-click” build (for end users)
 
-The intended reproducible workflow is to run an **external bootstrap Jupyter notebook** that you (the author) provide separately (not stored in this repo). The notebook:
+The intended reproducible workflow is to run an **external bootstrap Jupyter notebook** that I (the author) will provide separately (not stored in this repo). The notebook:
 
 1. Downloads this GitHub repository as a ZIP  
 2. Installs required Python packages  
