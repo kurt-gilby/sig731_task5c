@@ -1,0 +1,12 @@
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+pycountry>=22.3
+Pillow>=10.0
+wordcloud>=1.9
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+fiona>=1.9
+py7zr>=0.21
+ipython
